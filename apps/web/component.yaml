@@ -1,0 +1,78 @@
+apiVersion: sourceplane.io/v1
+kind: Component
+metadata:
+  name: web
+  description: The Astro site (Astro on Cloudflare Workers + Static Assets via @astrojs/cloudflare, per environment)
+spec:
+  type: cloudflare-workers-assets-turbo
+  lifecycle: production
+  owner: platform
+  domain: web
+  path: apps/web
+  # Its own lane per environment: the site's build is the longest job in the
+  # plan, and a shared lane would wait on it.
+  lane: isolated
+  subscribe:
+    environments:
+      - name: dev
+        profile: verify
+      - name: stage
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+      - name: prod
+        profile: verify
+        profileRules:
+          - profile: deploy
+            when:
+              triggerRef: github-push-main
+  parameters:
+    nodeVersion: "22"
+    pnpmVersion: "10.12.1"
+
+    workspaceDir: ../..
+    appDir: .
+
+    turboFilter: "@app/web"
+    # The config the dry run and the deploy hand to wrangler. The adapter
+    # writes a deployable one beside the Worker it emits
+    # (`dist/server/wrangler.json`: no_bundle, main entry.mjs, assets
+    # ../client), but only once it has built — and the lane checks that this
+    # file exists BEFORE build-app, in a job tree staged without dist/. So it
+    # names the committed wrangler.deploy.jsonc, which says what the generated
+    # one says (the dry run of each is the same upload); wrangler.jsonc stays
+    # what the adapter builds from.
+    wranglerConfig: wrangler.deploy.jsonc
+
+    # @astrojs/cloudflare (through the Cloudflare Vite plugin) emits the Worker
+    # under dist/server and the static output under dist/client — both deploy
+    # in one `wrangler deploy` of wrangler.deploy.jsonc.
+    workerEntrypoint: dist/server/entry.mjs
+    assetsDir: dist/client
+
+    # Per-env worker name: astro-test-web-{dev,stage,prod}.
+    workerName: astro-test-web
+    environmentAwareWorkerName: true
+
+    # The account's workers.dev subdomain; exported to the smoke step as
+    # ${WORKERS_DEV_SUBDOMAIN} and used to build ${DEPLOYED_URL}.
+    workersDevSubdomain: rahulvarghesepullely
+
+    installCommand: pnpm install --frozen-lockfile
+    buildCommand: pnpm exec turbo run build --filter=@app/web
+
+    # Smoke: the home page carries its greeting ("Welcome to", then the site's
+    # name from src/site.ts — the name is the owner's to change and HTML-escaped
+    # when it carries an `&` or `'`, so it is not what is matched), and /ssr is
+    # rendered by the Worker. The home page is pre-rendered and served from the
+    # assets alone, so it would answer even if the Worker did not. Each response
+    # is buffered before grep so an early match cannot SIGPIPE curl.
+    smokeCommand: "html=$(curl -sfL \"${DEPLOYED_URL}/\") && echo \"${html}\" | grep -q 'Welcome to' && ssr=$(curl -sfL \"${DEPLOYED_URL}/ssr\") && echo \"${ssr}\" | grep -q '<h1>'"
+  labels:
+    team: platform
+    layer: delivery
+    surface: web
+    runtime: cloudflare
+# orun: redeploy 02-site as_223e1298be3f4c4dbf97
